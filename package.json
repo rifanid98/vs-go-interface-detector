@@ -1,6 +1,11 @@
 {
   "name": "go-interface-detector",
   "displayName": "Go Interface Detector",
+  "publisher": "rifanid98",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rifanid98/vs-go-interface-detector.git"
+  },
   "description": "GoLand-like gutter icons and CodeLens for Go interface implementations with bi-directional navigation",
   "version": "0.1.0",
   "engines": {
