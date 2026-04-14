@@ -1,0 +1,59 @@
+{
+  "name": "go-interface-detector",
+  "displayName": "Go Interface Detector",
+  "description": "GoLand-like gutter icons and CodeLens for Go interface implementations with bi-directional navigation",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:go"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "go-interface-detector.goToImplementation",
+        "title": "Go to Interface Implementation"
+      },
+      {
+        "command": "go-interface-detector.goToInterface",
+        "title": "Go to Interface Definition"
+      }
+    ],
+    "configuration": {
+      "title": "Go Interface Detector",
+      "properties": {
+        "goInterfaceDetector.navigationBehavior": {
+          "type": "string",
+          "enum": [
+            "peek",
+            "quickPick"
+          ],
+          "enumDescriptions": [
+            "Show the built-in Peek panel (similar to 'Go to Implementations')",
+            "Show a QuickPick dropdown menu"
+          ],
+          "default": "quickPick",
+          "description": "Behavior when navigating from an interface/implementation to multiple targets."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.1.3"
+  }
+}
