@@ -25,9 +25,7 @@ let implDecorationType: vscode.TextEditorDecorationType;
 // ── Activation ───────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext) {
-    const iconPath = vscode.Uri.file(
-        path.join(context.extensionPath, 'images', 'implemented.svg')
-    );
+    const iconPath = vscode.Uri.joinPath(context.extensionUri, 'images', 'implemented.svg');
 
     interfaceDecorationType = vscode.window.createTextEditorDecorationType({
         gutterIconPath: iconPath,
