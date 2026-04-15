@@ -21,12 +21,15 @@ interface StructMethod {
 
 let interfaceDecorationType: vscode.TextEditorDecorationType;
 let implDecorationType: vscode.TextEditorDecorationType;
+let outputChannel: vscode.OutputChannel;
 
 // ── Activation ───────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext) {
+    outputChannel = vscode.window.createOutputChannel("Go Interface Detector");
+    outputChannel.appendLine("Extension activated.");
     const iconPath = vscode.Uri.file(
-        path.join(context.extensionPath, 'images', 'implemented.svg')
+        context.asAbsolutePath(path.join('images', 'implemented.svg'))
     );
 
     interfaceDecorationType = vscode.window.createTextEditorDecorationType({
@@ -51,16 +54,19 @@ export function activate(context: vscode.ExtensionContext) {
         )
     );
 
+    const codeLensProvider = new GoInterfaceCodeLensProvider();
+
     // Register CodeLens provider
     context.subscriptions.push(
         vscode.languages.registerCodeLensProvider(
             { language: 'go', scheme: 'file' },
-            new GoInterfaceCodeLensProvider()
+            codeLensProvider
         )
     );
 
     // Debounced decoration updates
     let timeout: NodeJS.Timeout | undefined;
+    let goplsStartRetryCount = 0;
 
     function triggerUpdateDecorations(editor: vscode.TextEditor | undefined) {
         if (timeout) {
@@ -69,7 +75,16 @@ export function activate(context: vscode.ExtensionContext) {
         }
         if (editor?.document.languageId === 'go') {
             timeout = setTimeout(() => {
-                void updateDecorations(editor);
+                void updateDecorations(editor).then((success) => {
+                    if (success) {
+                        codeLensProvider.refresh();
+                        goplsStartRetryCount = 0;
+                    } else if (goplsStartRetryCount < 10) {
+                        // gopls likely not ready, retry up to 10 times (10 seconds)
+                        goplsStartRetryCount++;
+                        setTimeout(() => triggerUpdateDecorations(editor), 1000);
+                    }
+                });
             }, 300);
         }
     }
@@ -97,6 +112,10 @@ class GoInterfaceCodeLensProvider implements vscode.CodeLensProvider {
     private _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
     public readonly onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
 
+    public refresh(): void {
+        this._onDidChangeCodeLenses.fire();
+    }
+
     async provideCodeLenses(
         document: vscode.TextDocument,
         _token: vscode.CancellationToken
@@ -109,6 +128,8 @@ class GoInterfaceCodeLensProvider implements vscode.CodeLensProvider {
 
         // ── Interface method side: show "N implementation(s)" ──
         const interfaceMethods = findInterfaceMethods(document);
+        outputChannel.appendLine(`[CodeLens] found ${interfaceMethods.length} interface methods in ${document.uri.fsPath}`);
+        
         for (const method of interfaceMethods) {
             const position = new vscode.Position(method.line, method.nameIdx);
             try {
@@ -125,14 +146,19 @@ class GoInterfaceCodeLensProvider implements vscode.CodeLensProvider {
                             arguments: [document.uri, position],
                         })
                     );
+                    outputChannel.appendLine(`[CodeLens] Interface ${method.name}: ${implementations.length} implementations`);
+                } else {
+                    outputChannel.appendLine(`[CodeLens] Interface ${method.name}: No implementations found`);
                 }
-            } catch {
-                // gopls may not be ready
+            } catch (err: any) {
+                outputChannel.appendLine(`[CodeLens] Error executing provider for ${method.name}: ${err?.message || err}`);
             }
         }
 
         // ── Struct method side: show "implements InterfaceName" ──
         const structMethods = findStructMethods(document);
+        outputChannel.appendLine(`[CodeLens] found ${structMethods.length} struct methods in ${document.uri.fsPath}`);
+        
         for (const method of structMethods) {
             const position = new vscode.Position(method.line, method.nameIdx);
             try {
@@ -146,7 +172,7 @@ class GoInterfaceCodeLensProvider implements vscode.CodeLensProvider {
                         .map(toLocation)
                         .filter(
                             (loc) =>
-                                loc.uri.toString() !== document.uri.toString() ||
+                                loc.uri.fsPath !== document.uri.fsPath ||
                                 loc.range.start.line !== method.line
                         );
 
@@ -254,7 +280,7 @@ async function goToInterfaceHandler(
             .map(toLocation)
             .filter(
                 (loc) =>
-                    loc.uri.toString() !== uri.toString() ||
+                    loc.uri.fsPath !== uri.fsPath ||
                     loc.range.start.line !== position.line
             );
 
@@ -407,16 +433,28 @@ function extractMethodFromLine(
 
 // ── Gutter Decoration Update ─────────────────────────────────────────────
 
-async function updateDecorations(editor: vscode.TextEditor) {
+async function updateDecorations(editor: vscode.TextEditor): Promise<boolean> {
     if (editor.document.languageId !== 'go') {
-        return;
+        return true;
     }
 
     const interfaceDecorations: vscode.DecorationOptions[] = [];
     const implDecorations: vscode.DecorationOptions[] = [];
+    
+    const interfaceMethods = findInterfaceMethods(editor.document);
+    const structMethods = findStructMethods(editor.document);
+    
+    outputChannel.appendLine(`[Decorations] updating for ${editor.document.uri.fsPath}. Interface methods: ${interfaceMethods.length}, Struct methods: ${structMethods.length}`);
+    
+    if (interfaceMethods.length === 0 && structMethods.length === 0) {
+        editor.setDecorations(interfaceDecorationType, interfaceDecorations);
+        editor.setDecorations(implDecorationType, implDecorations);
+        return true;
+    }
+
+    let providerSuccess = false;
 
     // ── Interface methods: check for implementations ──
-    const interfaceMethods = findInterfaceMethods(editor.document);
     for (const method of interfaceMethods) {
         const position = new vscode.Position(method.line, method.nameIdx);
         try {
@@ -424,6 +462,7 @@ async function updateDecorations(editor: vscode.TextEditor) {
                 vscode.Location[] | vscode.LocationLink[]
             >('vscode.executeImplementationProvider', editor.document.uri, position);
 
+            providerSuccess = true;
             if (implementations && implementations.length > 0) {
                 interfaceDecorations.push({
                     range: new vscode.Range(method.line, 0, method.line, 0),
@@ -432,13 +471,12 @@ async function updateDecorations(editor: vscode.TextEditor) {
                     ),
                 });
             }
-        } catch {
-            // gopls may not be ready
+        } catch (err: any) {
+            outputChannel.appendLine(`[Decorations] Error executing provider for interface ${method.name}: ${err?.message || err}`);
         }
     }
 
     // ── Struct methods: check if they implement an interface ──
-    const structMethods = findStructMethods(editor.document);
     for (const method of structMethods) {
         const position = new vscode.Position(method.line, method.nameIdx);
         try {
@@ -446,13 +484,14 @@ async function updateDecorations(editor: vscode.TextEditor) {
                 vscode.Location[] | vscode.LocationLink[]
             >('vscode.executeImplementationProvider', editor.document.uri, position);
 
+            providerSuccess = true;
             if (results && results.length > 0) {
                 // Filter out self-references
                 const filtered = results
                     .map(toLocation)
                     .filter(
                         (loc) =>
-                            loc.uri.toString() !== editor.document.uri.toString() ||
+                            loc.uri.fsPath !== editor.document.uri.fsPath ||
                             loc.range.start.line !== method.line
                     );
 
@@ -472,13 +511,15 @@ async function updateDecorations(editor: vscode.TextEditor) {
                     }
                 }
             }
-        } catch {
-            // gopls may not be ready
+        } catch (err: any) {
+            outputChannel.appendLine(`[Decorations] Error executing provider for struct ${method.name}: ${err?.message || err}`);
         }
     }
 
     editor.setDecorations(interfaceDecorationType, interfaceDecorations);
     editor.setDecorations(implDecorationType, implDecorations);
+    
+    return providerSuccess;
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────
