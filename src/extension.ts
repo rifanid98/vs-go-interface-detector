@@ -134,9 +134,20 @@ class GoInterfaceCodeLensProvider implements vscode.CodeLensProvider {
         for (const method of structMethods) {
             const position = new vscode.Position(method.line, method.nameIdx);
             try {
-                const results = await vscode.commands.executeCommand<
+                let results = await vscode.commands.executeCommand<
                     vscode.Location[] | vscode.LocationLink[]
                 >('vscode.executeImplementationProvider', document.uri, position);
+
+                // Fallback: If no results found or interface resolving fails easily, try targeting the receiver signature
+                if (!results || results.length === 0) {
+                    const receiverIdx = document.lineAt(method.line).text.indexOf(method.receiverType);
+                    if (receiverIdx >= 0) {
+                        const typePosition = new vscode.Position(method.line, receiverIdx);
+                        results = await vscode.commands.executeCommand<
+                            vscode.Location[] | vscode.LocationLink[]
+                        >('vscode.executeImplementationProvider', document.uri, typePosition);
+                    }
+                }
 
                 if (results && results.length > 0) {
                     // Filter out self-references (same file + same line)
@@ -369,7 +380,8 @@ function findStructMethods(document: vscode.TextDocument): StructMethod[] {
 
         const receiverType = match[1];
         const methodName = match[2];
-        const nameIdx = lines[lineNumber].indexOf(methodName, match.index + match[0].indexOf(methodName));
+        const beforeMethodName = match[0].substring(0, match[0].lastIndexOf(methodName));
+        const nameIdx = match.index + beforeMethodName.length;
 
         methods.push({
             line: lineNumber,
@@ -440,9 +452,20 @@ async function updateDecorations(editor: vscode.TextEditor) {
     for (const method of structMethods) {
         const position = new vscode.Position(method.line, method.nameIdx);
         try {
-            const results = await vscode.commands.executeCommand<
+            let results = await vscode.commands.executeCommand<
                 vscode.Location[] | vscode.LocationLink[]
             >('vscode.executeImplementationProvider', editor.document.uri, position);
+
+            // Fallback: If no results found, try targeting the receiver signature
+            if (!results || results.length === 0) {
+                const receiverIdx = editor.document.lineAt(method.line).text.indexOf(method.receiverType);
+                if (receiverIdx >= 0) {
+                    const typePosition = new vscode.Position(method.line, receiverIdx);
+                    results = await vscode.commands.executeCommand<
+                        vscode.Location[] | vscode.LocationLink[]
+                    >('vscode.executeImplementationProvider', editor.document.uri, typePosition);
+                }
+            }
 
             if (results && results.length > 0) {
                 // Filter out self-references
@@ -500,35 +523,59 @@ async function navigateToLocation(location: vscode.Location): Promise<void> {
 
 async function resolveInterfaceName(
     typeDefinitions: (vscode.Location | vscode.LocationLink)[],
-    _methodName: string
+    methodName: string
 ): Promise<string | null> {
     for (const def of typeDefinitions) {
         const loc = toLocation(def);
         try {
             const doc = await vscode.workspace.openTextDocument(loc.uri);
             const line = doc.lineAt(loc.range.start.line).text;
+            let interfaceName: string | null = null;
+            let interfaceStartLine = loc.range.start.line;
 
             // Check if line declares an interface
             const match = /type\s+(\w+)\s+interface\b/.exec(line);
             if (match) {
-                return match[1];
+                interfaceName = match[1];
+            } else {
+                // The type definition might point inside the interface body;
+                // scan upward to find the interface declaration
+                for (
+                    let i = loc.range.start.line - 1;
+                    i >= 0 && i >= loc.range.start.line - 50;
+                    i--
+                ) {
+                    const prevLine = doc.lineAt(i).text;
+                    const parentMatch = /type\s+(\w+)\s+interface\b/.exec(prevLine);
+                    if (parentMatch) {
+                        interfaceName = parentMatch[1];
+                        interfaceStartLine = i;
+                        break;
+                    }
+                    // Stop if we hit another type declaration
+                    if (/^[\t ]*type\s+/.test(prevLine) && !prevLine.includes('interface')) {
+                        break;
+                    }
+                }
             }
 
-            // The type definition might point inside the interface body;
-            // scan upward to find the interface declaration
-            for (
-                let i = loc.range.start.line - 1;
-                i >= 0 && i >= loc.range.start.line - 50;
-                i--
-            ) {
-                const prevLine = doc.lineAt(i).text;
-                const parentMatch = /type\s+(\w+)\s+interface\b/.exec(prevLine);
-                if (parentMatch) {
-                    return parentMatch[1];
+            if (interfaceName) {
+                // Verify the method is actually part of this interface body
+                let hasMethod = false;
+                for (let i = interfaceStartLine; i < doc.lineCount && i <= interfaceStartLine + 150; i++) {
+                    const checkLine = doc.lineAt(i).text;
+                    if (new RegExp(`^[\\t ]*${methodName}\\s*\\(`).test(checkLine)) {
+                        hasMethod = true;
+                        break;
+                    }
+                    // Stop if we hit end of interface block structure loosely
+                    if (i > interfaceStartLine && /^[\t ]*\}/.test(checkLine)) {
+                        break;
+                    }
                 }
-                // Stop if we hit another type declaration
-                if (/^[\t ]*type\s+/.test(prevLine) && !prevLine.includes('interface')) {
-                    break;
+                
+                if (hasMethod) {
+                    return interfaceName;
                 }
             }
         } catch {
